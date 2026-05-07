@@ -1,0 +1,12 @@
+flask
+flask-cors
+ffmpeg-python
+openai-whisper
+transformers
+torch
+sentencepiece
+sacremoses
+accelerate
+huggingface_hub
+protobuf
+numpy
