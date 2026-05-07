@@ -1,3 +1,5 @@
+# Main backend for AI Video Summarizer + Quiz Generator
+
 from flask import Flask, request, jsonify
 import os
 import math
@@ -10,9 +12,7 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-# =========================================
-# FOLDERS
-# =========================================
+# Folder setup
 
 UPLOAD_FOLDER = "uploads"
 OUTPUT_FOLDER = "outputs"
@@ -23,25 +23,19 @@ os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 
 
-# =========================================
-# HOME ROUTE
-# =========================================
+# Home route
 
 @app.route("/")
 def home():
     return "AI Video Summarizer Backend Running"
 
 
-# =========================================
-# UPLOAD ROUTE
-# =========================================
+# Upload and process route
 
 @app.route("/upload", methods=["POST"])
 def upload_video():
 
-    # -------------------------------------
-    # Validate file
-    # -------------------------------------
+    # Basic file validation
 
     if "video" not in request.files:
         return jsonify({
@@ -55,9 +49,7 @@ def upload_video():
             "error": "Empty filename"
         }), 400
 
-    # -------------------------------------
     # Save uploaded video
-    # -------------------------------------
 
     video_path = os.path.join(
         app.config["UPLOAD_FOLDER"],
@@ -73,9 +65,7 @@ def upload_video():
 
     try:
 
-        # =========================================
-        # STEP 1 → EXTRACT AUDIO USING FFMPEG
-        # =========================================
+        # Step 1: Extract audio from video
 
         (
             ffmpeg
@@ -84,9 +74,7 @@ def upload_video():
             .run(overwrite_output=True)
         )
 
-        # =========================================
-        # STEP 2 → WHISPER SMALL → TRANSCRIPT
-        # =========================================
+        # Step 2: Convert speech to text using Whisper
 
         whisper_model = whisper.load_model("small")
 
@@ -105,9 +93,7 @@ def upload_video():
         ) as f:
             f.write(transcript)
 
-        # =========================================
-        # STEP 3 → BART → SUMMARY
-        # =========================================
+        # Step 3: Generate summary using BART
 
         summarizer = pipeline(
             "summarization",
@@ -135,35 +121,15 @@ def upload_video():
         ) as f:
             f.write(summary)
 
-        # =========================================
-        # STEP 4 → FLAN-T5 LARGE → QUIZ GENERATION
-        # LOOP-BASED APPROACH
-        # =========================================
-        #
-        # Why loop-based?
-        #   FLAN-T5 cannot generate multiple Q&A
-        #   pairs in a single call. It always
-        #   collapses to 1 question regardless of
-        #   max_new_tokens or prompt instructions.
-        #
-        # Solution:
-        #   1. Get video duration using ffprobe
-        #   2. Calculate question count based on duration
-        #   3. Split transcript into chunks
-        #   4. Generate Question + Correct Answer per chunk
-        #   5. Use correct answers from other questions as distractors
-        #      to prevent duplicate options and speed up execution
-        # =========================================
+        # Step 4: Quiz generation using FLAN-T5
+        # FLAN-T5 works better when generating one Q&A at a time
 
-        # Changed to flan-t5-large for much faster generation while maintaining quality
         quiz_generator = pipeline(
             "text2text-generation",
             model="google/flan-t5-large"
         )
 
-        # -------------------------------------
-        # Get video duration using ffprobe
-        # -------------------------------------
+        # Get video duration
 
         probe = ffmpeg.probe(video_path)
         duration_seconds = float(
@@ -171,11 +137,8 @@ def upload_video():
         )
         duration_minutes = duration_seconds / 60
 
-        # -------------------------------------
-        # Calculate number of questions
-        # ~2 questions per minute
-        # Minimum 3, Maximum 10
-        # -------------------------------------
+        # Around 2 questions per minute
+        # minimum 3 and maximum 10
 
         num_questions = min(
             10,
@@ -185,18 +148,11 @@ def upload_video():
         print(f"\nVideo Duration: {duration_minutes:.1f} minutes")
         print(f"Generating {num_questions} quiz questions...\n")
 
-        # -------------------------------------
         # Split transcript into chunks
-        # Each chunk → 1 question
-        # -------------------------------------
 
         words = transcript.split()
         total_words = len(words)
         chunk_size = max(1, total_words // num_questions)
-
-        # -------------------------------------
-        # Generate questions and correct answers
-        # -------------------------------------
 
         quiz_data = []
         generated_questions = set()
@@ -204,68 +160,89 @@ def upload_video():
 
         for i in range(num_questions):
 
-            # Get transcript chunk for this question
             start_idx = i * chunk_size
             end_idx = min(
                 start_idx + chunk_size + 20,
                 total_words
             )
+
             chunk = " ".join(words[start_idx:end_idx])
 
-            # Keep chunk within FLAN-T5 token limit
+            # Keep chunk small for FLAN-T5 token limits
             chunk = chunk[:400]
 
-            # --- Generate Question ---
+            # Generate question
+
             q_prompt = (
                 f"Read the following text and generate one meaningful question based on it.\n\n"
                 f"Text: {chunk}\n\n"
                 f"Question:"
             )
+
             q_result = quiz_generator(
-                q_prompt, max_new_tokens=64, do_sample=False
+                q_prompt,
+                max_new_tokens=64,
+                do_sample=False
             )
+
             question = q_result[0]["generated_text"].strip()
 
-            # Skip duplicate questions
             if question.lower() in generated_questions or not question.endswith("?"):
                 continue
+
             generated_questions.add(question.lower())
 
-            # --- Generate Correct Answer ---
+            # Generate short answer
+
             a_prompt = (
                 f"Based on the text, answer this question as briefly as possible (1-5 words).\n\n"
                 f"Text: {chunk}\n"
                 f"Question: {question}\n\n"
                 f"Answer:"
             )
+
             a_result = quiz_generator(
-                a_prompt, max_new_tokens=32, do_sample=False
+                a_prompt,
+                max_new_tokens=32,
+                do_sample=False
             )
+
             correct_answer = a_result[0]["generated_text"].strip()
 
             if correct_answer:
-                quiz_data.append({"question": question, "correct": correct_answer})
-                if correct_answer.lower() not in [ans.lower() for ans in all_correct_answers]:
+                quiz_data.append({
+                    "question": question,
+                    "correct": correct_answer
+                })
+
+                if correct_answer.lower() not in [
+                    ans.lower() for ans in all_correct_answers
+                ]:
                     all_correct_answers.append(correct_answer)
 
-        # -------------------------------------
-        # Combine Options and Build Quiz Lines
-        # -------------------------------------
-        
+        # Build MCQ options
+
         quiz_lines = []
-        fallback_distractors = ["All of the above", "None of the above", "Information not provided", "Not enough context"]
+
+        fallback_distractors = [
+            "All of the above",
+            "None of the above",
+            "Information not provided",
+            "Not enough context"
+        ]
 
         for idx, item in enumerate(quiz_data):
             q_num = idx + 1
             question = item["question"]
             correct_answer = item["correct"]
 
-            # Filter out the correct answer from the pool of all answers
-            distractors = [ans for ans in all_correct_answers if ans.lower() != correct_answer.lower()]
-            
+            distractors = [
+                ans for ans in all_correct_answers
+                if ans.lower() != correct_answer.lower()
+            ]
+
             options = [correct_answer]
-            
-            # Ensure we have exactly 2 wrong options for a total of 3 options
+
             if len(distractors) >= 2:
                 options.extend(random.sample(distractors, 2))
             elif len(distractors) == 1:
@@ -274,15 +251,15 @@ def upload_video():
             else:
                 options.extend(random.sample(fallback_distractors, 2))
 
-            # Shuffle options so the correct answer isn't always A
             random.shuffle(options)
 
             correct_letter = ""
             formatted_options = []
             labels = ["A", "B", "C"]
-            
+
             for i, opt in enumerate(options):
                 formatted_options.append(f"{labels[i]}) {opt}")
+
                 if opt == correct_answer:
                     correct_letter = labels[i]
 
@@ -294,15 +271,10 @@ def upload_video():
                 f"Correct Answer: {correct_letter}"
             )
 
-            # --- Add to quiz ---
             formatted_mcq = f"Q{q_num}: {mcq_text}"
             quiz_lines.append(formatted_mcq)
 
             print(f"--- Question {q_num} ---\n{mcq_text}\n")
-
-        # -------------------------------------
-        # Combine into final quiz text
-        # -------------------------------------
 
         quiz_text = "\n\n".join(quiz_lines)
 
@@ -324,9 +296,7 @@ def upload_video():
         ) as f:
             f.write(quiz_text)
 
-        # =========================================
-        # STEP 5 → MULTIPLE LANGUAGE SUPPORT
-        # =========================================
+        # Step 5: Language selection
 
         language_map = {
             "Telugu": "tel_Telu",
@@ -347,18 +317,12 @@ def upload_video():
             "tel_Telu"
         )
 
-        # =========================================
-        # STEP 6 → NLLB TRANSLATION MODEL
-        # =========================================
+        # Step 6: Translation using NLLB
 
         translator = pipeline(
             "translation",
             model="facebook/nllb-200-distilled-600M"
         )
-
-        # -------------------------------------
-        # Translate Transcript
-        # -------------------------------------
 
         translated_transcript_result = translator(
             transcript[:2000],
@@ -383,10 +347,6 @@ def upload_video():
         ) as f:
             f.write(translated_transcript)
 
-        # -------------------------------------
-        # Translate Summary
-        # -------------------------------------
-
         translated_summary_result = translator(
             summary,
             src_lang="eng_Latn",
@@ -410,9 +370,7 @@ def upload_video():
         ) as f:
             f.write(translated_summary)
 
-        # =========================================
-        # STEP 7 → FINAL JSON RESPONSE
-        # =========================================
+        # Final API response
 
         return jsonify({
             "message": "Video uploaded, transcript, summary, quiz, and translation generated successfully",
@@ -430,7 +388,9 @@ def upload_video():
 
             "quiz_path": quiz_path,
 
-            "transcript_preview": transcript[:500] + ("..." if len(transcript) > 500 else ""),
+            "transcript_preview": transcript[:500] + (
+                "..." if len(transcript) > 500 else ""
+            ),
             "summary_preview": summary,
             "quiz_preview": quiz_text,
             "translated_summary_preview": translated_summary
@@ -444,9 +404,7 @@ def upload_video():
         }), 500
 
 
-# =========================================
-# RUN APP
-# =========================================
+# Run Flask app
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
